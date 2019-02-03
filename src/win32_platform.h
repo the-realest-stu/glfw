@@ -322,6 +322,10 @@ typedef struct _GLFWwindowWin32
     // The last recevied high surrogate when decoding pairs of UTF-16 messages
     WCHAR               highSurrogate;
 
+    // If user pressed mouse button on window title bar
+    UINT                ncMouseButton;
+    LPARAM              ncMousePos;
+
 } _GLFWwindowWin32;
 
 // Win32-specific global data
@@ -343,6 +347,8 @@ typedef struct _GLFWlibraryWin32
     RAWINPUT*           rawInput;
     int                 rawInputSize;
     UINT                mouseTrailSize;
+    LPVOID              messageFiber;
+    LPVOID              mainFiber;
 
     struct {
         HINSTANCE                       instance;
