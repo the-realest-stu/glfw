@@ -140,6 +140,7 @@ information on what to include when reporting a bug.
  - [X11] Bugfix: Decorations could not be enabled after window creation (#1566)
  - [X11] Bugfix: Content scale fallback value could be inconsistent (#1578)
  - [NSGL] Removed enforcement of forward-compatible flag for core contexts
+ - [NSGL] Bugfix: Workaround for swap interval on 10.14 broke on 10.12 (#1483)
 
 
 ## Contact
