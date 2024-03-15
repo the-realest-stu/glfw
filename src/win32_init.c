@@ -1,5 +1,5 @@
 //========================================================================
-// GLFW 3.3 Win32 - www.glfw.org
+// GLFW 3.4 Win32 - www.glfw.org
 //------------------------------------------------------------------------
 // Copyright (c) 2002-2006 Marcus Geelnard
 // Copyright (c) 2006-2019 Camilla Löwy <elmindreda@glfw.org>
@@ -24,6 +24,8 @@
 //    distribution.
 //
 //========================================================================
+// Please use C89 style variable declarations in this file because VS 2010
+//========================================================================
 
 #include "internal.h"
 
@@ -36,6 +38,10 @@ static const GUID _glfw_GUID_DEVINTERFACE_HID =
 #define GUID_DEVINTERFACE_HID _glfw_GUID_DEVINTERFACE_HID
 
 #if defined(_GLFW_USE_HYBRID_HPG) || defined(_GLFW_USE_OPTIMUS_HPG)
+
+#if defined(_GLFW_BUILD_DLL)
+ #warning "These symbols must be exported by the executable and have no effect in a DLL"
+#endif
 
 // Executables (but not DLLs) exporting this symbol with this value will be
 // automatically directed to the high-performance GPU on Nvidia Optimus systems
@@ -141,6 +147,8 @@ static GLFWbool loadLibraries(void)
             GetProcAddress(_glfw.win32.dwmapi.instance, "DwmFlush");
         _glfw.win32.dwmapi.EnableBlurBehindWindow = (PFN_DwmEnableBlurBehindWindow)
             GetProcAddress(_glfw.win32.dwmapi.instance, "DwmEnableBlurBehindWindow");
+        _glfw.win32.dwmapi.GetColorizationColor = (PFN_DwmGetColorizationColor)
+            GetProcAddress(_glfw.win32.dwmapi.instance, "DwmGetColorizationColor");
     }
 
     _glfw.win32.shcore.instance = LoadLibraryA("shcore.dll");
@@ -331,8 +339,6 @@ static void createKeyTables(void)
 //
 static GLFWbool createHelperWindow(void)
 {
-    MSG msg;
-
     _glfw.win32.helperWindowHandle =
         CreateWindowExW(WS_EX_OVERLAPPEDWINDOW,
                         _GLFW_WNDCLASSNAME,
@@ -368,13 +374,21 @@ static GLFWbool createHelperWindow(void)
                                         DEVICE_NOTIFY_WINDOW_HANDLE);
     }
 
-    while (PeekMessageW(&msg, _glfw.win32.helperWindowHandle, 0, 0, PM_REMOVE))
+    if (_glfw.hints.init.win32.msgInFiber)
     {
-        TranslateMessage(&msg);
-        DispatchMessageW(&msg);
+        SwitchToFiber(_glfw.win32.messageFiber);
+    }
+    else
+    {
+        MSG msg;
+        while (PeekMessageW(&msg, _glfw.win32.helperWindowHandle, 0, 0, PM_REMOVE))
+        {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
     }
 
-   return GLFW_TRUE;
+    return GLFW_TRUE;
 }
 
 
@@ -523,7 +537,7 @@ BOOL _glfwIsWindowsVersionOrGreaterWin32(WORD major, WORD minor, WORD sp)
     cond = VerSetConditionMask(cond, VER_MINORVERSION, VER_GREATER_EQUAL);
     cond = VerSetConditionMask(cond, VER_SERVICEPACKMAJOR, VER_GREATER_EQUAL);
     // HACK: Use RtlVerifyVersionInfo instead of VerifyVersionInfoW as the
-    //       latter lies unless the user knew to embedd a non-default manifest
+    //       latter lies unless the user knew to embed a non-default manifest
     //       announcing support for Windows 10 via supportedOS GUID
     return RtlVerifyVersionInfo(&osvi, mask, cond) == 0;
 }
@@ -538,11 +552,49 @@ BOOL _glfwIsWindows10BuildOrGreaterWin32(WORD build)
     cond = VerSetConditionMask(cond, VER_MINORVERSION, VER_GREATER_EQUAL);
     cond = VerSetConditionMask(cond, VER_BUILDNUMBER, VER_GREATER_EQUAL);
     // HACK: Use RtlVerifyVersionInfo instead of VerifyVersionInfoW as the
-    //       latter lies unless the user knew to embedd a non-default manifest
+    //       latter lies unless the user knew to embed a non-default manifest
     //       announcing support for Windows 10 via supportedOS GUID
     return RtlVerifyVersionInfo(&osvi, mask, cond) == 0;
 }
 
+void _glfwPollMessageLoopWin32(void)
+{
+    _GLFWwindow* window;
+    MSG msg;
+    while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE))
+    {
+        if (msg.message == WM_QUIT)
+        {
+            // NOTE: While GLFW does not itself post WM_QUIT, other processes
+            //       may post it to this one, for example Task Manager
+            // HACK: Treat WM_QUIT as a close on all windows
+
+            window = _glfw.windowListHead;
+            while (window)
+            {
+                _glfwInputWindowCloseRequest(window);
+                window = window->next;
+            }
+        }
+        else
+        {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+}
+
+// Windows message dispatch fiber
+void CALLBACK messageFiberProc(LPVOID lpFiberParameter)
+{
+    (void)lpFiberParameter;
+
+    for (;;)
+    {
+        _glfwPollMessageLoopWin32();
+        SwitchToFiber(_glfw.win32.mainFiber);
+    }
+}
 
 //////////////////////////////////////////////////////////////////////////
 //////                       GLFW platform API                      //////
@@ -571,6 +623,17 @@ int _glfwPlatformInit(void)
     else if (IsWindowsVistaOrGreater())
         SetProcessDPIAware();
 
+    if (_glfw.hints.init.win32.msgInFiber)
+    {
+        _glfw.win32.mainFiber = ConvertThreadToFiber(NULL);
+        if (!_glfw.win32.mainFiber)
+            return GLFW_FALSE;
+
+        _glfw.win32.messageFiber = CreateFiber(0, &messageFiberProc, NULL);
+        if (!_glfw.win32.messageFiber)
+            return GLFW_FALSE;
+    }
+
     if (!_glfwRegisterWindowClassWin32())
         return GLFW_FALSE;
 
@@ -578,7 +641,6 @@ int _glfwPlatformInit(void)
         return GLFW_FALSE;
 
     _glfwInitTimerWin32();
-    _glfwInitJoysticksWin32();
 
     _glfwPollMonitorsWin32();
     return GLFW_TRUE;
@@ -594,6 +656,12 @@ void _glfwPlatformTerminate(void)
 
     _glfwUnregisterWindowClassWin32();
 
+    if (_glfw.hints.init.win32.msgInFiber)
+    {
+        DeleteFiber(_glfw.win32.messageFiber);
+        ConvertFiberToThread();
+    }
+
     // Restore previous foreground lock timeout system setting
     SystemParametersInfoW(SPI_SETFOREGROUNDLOCKTIMEOUT, 0,
                           UIntToPtr(_glfw.win32.foregroundLockTimeout),
@@ -605,15 +673,15 @@ void _glfwPlatformTerminate(void)
     _glfwTerminateWGL();
     _glfwTerminateEGL();
 
-    _glfwTerminateJoysticksWin32();
-
     freeLibraries();
 }
 
 const char* _glfwPlatformGetVersionString(void)
 {
     return _GLFW_VERSION_NUMBER " Win32 WGL EGL OSMesa"
-#if defined(__MINGW32__)
+#if defined(__MINGW64_VERSION_MAJOR)
+        " MinGW-w64"
+#elif defined(__MINGW32__)
         " MinGW"
 #elif defined(_MSC_VER)
         " VisualC"
